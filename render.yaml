@@ -1,0 +1,39 @@
+services:
+  # 1. Managed PostgreSQL Database
+  - type: db
+    name: pulse-uptime-db
+    databaseName: uptime_monitor
+    user: postgres
+    plan: free
+
+  # 2. Node/Express Backend API Service
+  - type: web
+    name: pulse-uptime-api
+    env: node
+    plan: free
+    buildCommand: npm install
+    startCommand: node index.js
+    rootDir: backend
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: pulse-uptime-db
+          property: connectionString
+      - key: PORT
+        value: 10000
+      - key: NODE_ENV
+        value: production
+
+  # 3. Vite React Frontend (Served as Static Site)
+  - type: web
+    name: pulse-uptime-dashboard
+    env: static
+    plan: free
+    buildCommand: npm install && npm run build
+    publishDir: dist
+    rootDir: frontend
+    envVars:
+      - key: VITE_API_URL
+        fromRoute:
+          type: web
+          name: pulse-uptime-api
