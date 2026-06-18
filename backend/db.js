@@ -3,7 +3,7 @@ import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
 
-const mongoUri = process.env.MONGO_URI || 'mongodb+srv://SURJEETKUMAR:VtOZsbxmH6vKZlmn@cluster0.ji8qiof.mongodb.net/bookmark-app';
+const mongoUri = process.env.MONGO_URI;
 
 let useJsonFallback = false;
 const JSON_DB_PATH = path.join(process.cwd(), 'db.json');
