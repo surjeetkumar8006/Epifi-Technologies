@@ -6,7 +6,7 @@ Pulse is a lightweight, full-stack uptime monitoring application designed for ea
 
 ## ⚡ 1-Line Setup
 
-You can spin up the entire ecosystem (PostgreSQL database, Express API, React frontend) locally with a single command:
+You can spin up the entire ecosystem (MongoDB database, Express API, React frontend) locally with a single command:
 
 ```bash
 docker compose up --build
@@ -14,7 +14,7 @@ docker compose up --build
 
 - **Frontend Dashboard:** [http://localhost:3000](http://localhost:3000)
 - **Backend API Server:** [http://localhost:5000](http://localhost:5000)
-- **PostgreSQL Database:** Port `5432`
+- **MongoDB Database:** Port `27017`
 
 ---
 

@@ -1,14 +1,31 @@
-import pg from 'pg';
+import mongoose from 'mongoose';
 import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
 
-const { Pool } = pg;
-const connectionString = process.env.DATABASE_URL || 'postgresql://postgres:postgres@db:5432/uptime_monitor';
+const mongoUri = process.env.MONGO_URI || 'mongodb+srv://SURJEETKUMAR:VtOZsbxmH6vKZlmn@cluster0.ji8qiof.mongodb.net/bookmark-app';
 
-let pool = null;
 let useJsonFallback = false;
 const JSON_DB_PATH = path.join(process.cwd(), 'db.json');
+
+// Define MongoDB Schemas
+const monitorSchema = new mongoose.Schema({
+  url: { type: String, unique: true, required: true },
+  name: { type: String },
+  createdAt: { type: Date, default: Date.now }
+});
+
+const healthCheckSchema = new mongoose.Schema({
+  monitorId: { type: mongoose.Schema.Types.ObjectId, ref: 'Monitor', required: true },
+  statusCode: { type: Number },
+  responseTimeMs: { type: Number },
+  isUp: { type: Boolean, required: true },
+  errorMessage: { type: String },
+  timestamp: { type: Date, default: Date.now }
+});
+
+const Monitor = mongoose.models.Monitor || mongoose.model('Monitor', monitorSchema);
+const HealthCheck = mongoose.models.HealthCheck || mongoose.model('HealthCheck', healthCheckSchema);
 
 // Helper to initialize JSON DB file if missing
 function initJsonFileDb() {
@@ -41,54 +58,19 @@ function writeJsonDb(data) {
 
 // --- INITIALIZATION ---
 export async function initDb() {
-  pool = new Pool({ connectionString });
-  
-  // Try connecting with a 5-second timeout threshold (2 retries locally)
-  let retries = 2;
-  while (retries > 0) {
-    try {
-      await pool.query('SELECT 1');
-      console.log('PostgreSQL database connection established successfully.');
-      
-      // Create PostgreSQL tables
-      const createMonitorsTable = `
-        CREATE TABLE IF NOT EXISTS monitors (
-          id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-          url TEXT UNIQUE NOT NULL,
-          name TEXT,
-          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-      `;
-
-      const createHealthChecksTable = `
-        CREATE TABLE IF NOT EXISTS health_checks (
-          id SERIAL PRIMARY KEY,
-          monitor_id UUID NOT NULL REFERENCES monitors(id) ON DELETE CASCADE,
-          status_code INTEGER,
-          response_time_ms INTEGER,
-          is_up BOOLEAN NOT NULL,
-          error_message TEXT,
-          timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-      `;
-
-      await pool.query(createMonitorsTable);
-      await pool.query(createHealthChecksTable);
-      console.log('PostgreSQL database tables verified.');
-      return;
-    } catch (err) {
-      console.log(`PostgreSQL connection failed. (${retries - 1} attempts left)`);
-      retries -= 1;
-      if (retries > 0) {
-        await new Promise(resolve => setTimeout(resolve, 1500));
-      }
-    }
+  try {
+    console.log('Connecting to MongoDB Atlas...');
+    // Enable connection timeout limits
+    await mongoose.connect(mongoUri, {
+      serverSelectionTimeoutMS: 5000
+    });
+    console.log('MongoDB connection established successfully.');
+  } catch (err) {
+    console.error('MongoDB connection failed. Error:', err.message);
+    console.warn('⚠️ WARNING: Falling back to local JSON file database...');
+    useJsonFallback = true;
+    initJsonFileDb();
   }
-
-  // Fallback to JSON file database
-  console.warn('⚠️ WARNING: Could not connect to PostgreSQL. Falling back to local JSON file database...');
-  useJsonFallback = true;
-  initJsonFileDb();
 }
 
 // --- DATABASE OPERATIONS INTERFACE ---
@@ -97,11 +79,15 @@ export async function initDb() {
 export async function getMonitors() {
   if (useJsonFallback) {
     const db = readJsonDb();
-    // Sort descending by created_at
     return [...db.monitors].sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
   } else {
-    const result = await pool.query('SELECT * FROM monitors ORDER BY created_at DESC');
-    return result.rows;
+    const monitors = await Monitor.find().sort({ createdAt: -1 });
+    return monitors.map(m => ({
+      id: m._id.toString(),
+      url: m.url,
+      name: m.name,
+      created_at: m.createdAt
+    }));
   }
 }
 
@@ -111,8 +97,8 @@ export async function getMonitorByUrl(url) {
     const db = readJsonDb();
     return db.monitors.find(m => m.url === url) || null;
   } else {
-    const result = await pool.query('SELECT * FROM monitors WHERE url = $1', [url]);
-    return result.rows[0] || null;
+    const m = await Monitor.findOne({ url });
+    return m ? { id: m._id.toString(), url: m.url, name: m.name, created_at: m.createdAt } : null;
   }
 }
 
@@ -122,8 +108,12 @@ export async function getMonitorById(id) {
     const db = readJsonDb();
     return db.monitors.find(m => m.id === id) || null;
   } else {
-    const result = await pool.query('SELECT * FROM monitors WHERE id = $1', [id]);
-    return result.rows[0] || null;
+    try {
+      const m = await Monitor.findById(id);
+      return m ? { id: m._id.toString(), url: m.url, name: m.name, created_at: m.createdAt } : null;
+    } catch (_) {
+      return null;
+    }
   }
 }
 
@@ -141,11 +131,8 @@ export async function addMonitor(url, name) {
     writeJsonDb(db);
     return newMonitor;
   } else {
-    const result = await pool.query(
-      'INSERT INTO monitors (url, name) VALUES ($1, $2) RETURNING *',
-      [url, name]
-    );
-    return result.rows[0];
+    const m = await new Monitor({ url, name }).save();
+    return { id: m._id.toString(), url: m.url, name: m.name, created_at: m.createdAt };
   }
 }
 
@@ -157,13 +144,18 @@ export async function deleteMonitor(id) {
     if (monitorIdx === -1) return null;
     
     const [deletedMonitor] = db.monitors.splice(monitorIdx, 1);
-    // Cascade delete health checks
     db.health_checks = db.health_checks.filter(c => c.monitor_id !== id);
     writeJsonDb(db);
     return deletedMonitor;
   } else {
-    const result = await pool.query('DELETE FROM monitors WHERE id = $1 RETURNING *', [id]);
-    return result.rows[0] || null;
+    try {
+      const m = await Monitor.findByIdAndDelete(id);
+      if (!m) return null;
+      await HealthCheck.deleteMany({ monitorId: id });
+      return { id: m._id.toString(), url: m.url, name: m.name, created_at: m.createdAt };
+    } catch (_) {
+      return null;
+    }
   }
 }
 
@@ -184,12 +176,26 @@ export async function addHealthCheck(monitorId, statusCode, responseTimeMs, isUp
     writeJsonDb(db);
     return newCheck;
   } else {
-    const result = await pool.query(
-      `INSERT INTO health_checks (monitor_id, status_code, response_time_ms, is_up, error_message)
-       VALUES ($1, $2, $3, $4, $5) RETURNING *`,
-      [monitorId, statusCode, responseTimeMs, isUp, errorMessage]
-    );
-    return result.rows[0];
+    try {
+      const c = await new HealthCheck({
+        monitorId,
+        statusCode,
+        responseTimeMs,
+        isUp,
+        errorMessage
+      }).save();
+      return {
+        id: c._id.toString(),
+        monitor_id: c.monitorId.toString(),
+        status_code: c.statusCode,
+        response_time_ms: c.responseTimeMs,
+        is_up: c.isUp,
+        error_message: c.errorMessage,
+        timestamp: c.timestamp
+      };
+    } catch (err) {
+      console.error('Error adding MongoDB health check:', err);
+    }
   }
 }
 
@@ -199,7 +205,6 @@ export async function getLatestChecksForAllMonitors() {
     const db = readJsonDb();
     const checksMap = {};
     
-    // Group checks by monitor
     db.health_checks.forEach(check => {
       if (!checksMap[check.monitor_id]) {
         checksMap[check.monitor_id] = [];
@@ -209,22 +214,46 @@ export async function getLatestChecksForAllMonitors() {
 
     const resultChecks = [];
     Object.keys(checksMap).forEach(monitorId => {
-      // Sort checks by timestamp ascending for the frontend chart, but keep only the last 10
       const sorted = [...checksMap[monitorId]].sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
       resultChecks.push(...sorted.slice(-10));
     });
 
     return resultChecks;
   } else {
-    const result = await pool.query(`
-      WITH ranked_checks AS (
-        SELECT *,
-               ROW_NUMBER() OVER (PARTITION BY monitor_id ORDER BY timestamp DESC) as rn
-        FROM health_checks
-      )
-      SELECT * FROM ranked_checks WHERE rn <= 10 ORDER BY monitor_id, timestamp ASC
-    `);
-    return result.rows;
+    // MongoDB Aggregation: grouping health_checks by monitorId and extracting top 10 latest checks
+    const checksGrouped = await HealthCheck.aggregate([
+      { $sort: { timestamp: -1 } },
+      {
+        $group: {
+          _id: '$monitorId',
+          checks: { $push: '$$ROOT' }
+        }
+      },
+      {
+        $project: {
+          checks: { $slice: ['$checks', 10] }
+        }
+      }
+    ]);
+
+    const result = [];
+    checksGrouped.forEach(group => {
+      // Sort checks ascending for chronological UI charts
+      const reversed = [...group.checks].reverse();
+      reversed.forEach(c => {
+        result.push({
+          id: c._id.toString(),
+          monitor_id: c.monitorId.toString(),
+          status_code: c.statusCode,
+          response_time_ms: c.responseTimeMs,
+          is_up: c.isUp,
+          error_message: c.errorMessage,
+          timestamp: c.timestamp
+        });
+      });
+    });
+
+    return result;
   }
 }
 
@@ -237,10 +266,21 @@ export async function getHealthChecksForMonitor(monitorId, limit = 100) {
       .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))
       .slice(0, limit);
   } else {
-    const result = await pool.query(
-      'SELECT * FROM health_checks WHERE monitor_id = $1 ORDER BY timestamp DESC LIMIT $2',
-      [monitorId, limit]
-    );
-    return result.rows;
+    try {
+      const checks = await HealthCheck.find({ monitorId })
+        .sort({ timestamp: -1 })
+        .limit(limit);
+      return checks.map(c => ({
+        id: c._id.toString(),
+        monitor_id: c.monitorId.toString(),
+        status_code: c.statusCode,
+        response_time_ms: c.responseTimeMs,
+        is_up: c.isUp,
+        error_message: c.errorMessage,
+        timestamp: c.timestamp
+      }));
+    } catch (_) {
+      return [];
+    }
   }
 }
